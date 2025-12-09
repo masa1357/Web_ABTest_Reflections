@@ -1,0 +1,2 @@
+# Web_ABTest_Reflections
+LLMの回答データに対してABテストを行うプラットフォームを構築
