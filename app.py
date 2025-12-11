@@ -421,6 +421,7 @@ def main():
 
     st.title("フィードバック比較評価")
     st.markdown("同じ名前でアクセスすると、途中から評価を再開できます。")
+    st.markdown("意図せず途中から始まる場合、同じ名前が使われている可能性があります。\n別の名前をお試しください。")
 
     user_id = st.text_input(
         "任意の名前を記入してください...",
@@ -428,10 +429,6 @@ def main():
         placeholder="例: 名前+生年月日 など",
     ).strip()
     # もし途中から始まるなら，別の名前で始めるよう促すテキストを表示
-    st.markdown(
-        "<span style='color:blue;'>意図せず途中から始まる場合、同じ名前が使われている可能性があります。\n別の名前をお試しください。</span>",
-        unsafe_allow_html=True,
-    )
     # 赤文字で，名前を忘れると途中から再開できない旨を表示
     st.markdown(
         "<span style='color:red;'>注意! 名前を忘れると途中から再開できません!</span>", unsafe_allow_html=True
