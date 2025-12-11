@@ -425,7 +425,7 @@ def main():
     user_id = st.text_input(
         "任意の名前を記入してください...",
         value="",
-        placeholder="例: worker001 / student_A など",
+        placeholder="例: 名前+生年月日 など",
     ).strip()
     # 赤文字で，名前を忘れると途中から再開できない旨を表示
     st.markdown(
