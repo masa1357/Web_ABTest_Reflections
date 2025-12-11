@@ -485,68 +485,112 @@ def main():
 
         participant_key = str(abs(hash(user_id)))
         responses: Dict[str, str] = {}
-        for field, title, description in questions:
-            st.markdown(f"**{title}**")
-            st.caption(description)
+        with st.container(height=800):
+            with st.form(key=f"eval_form_{current_index}_{participant_key}"):
+                for field, title, description in questions:
+                    st.markdown(f"**{title}**")
+                    st.caption(description)
 
-            # 左: "Aが良い" 、中央: 5つの○/●ボタン、右: "Bが良い"
-            key = f"{field}_{current_index}_{participant_key}"
-            if key not in st.session_state:
-                # デフォルトは中央（インデックス2 = 3番目）
-                st.session_state[key] = local_options[2]
+                    # 左: "Aが良い" 、中央: 5つの○/●ボタン、右: "Bが良い"
+                    key = f"{field}_{current_index}_{participant_key}"
+                    if key not in st.session_state:
+                        # デフォルトは中央（インデックス2 = 3番目）
+                        st.session_state[key] = local_options[2]
 
-            # カラム配置: [label, btn1, btn2, btn3, btn4, btn5, label]
-            cols = st.columns([1.3, 1.0, 1.0, 1.0, 1.0, 1.0, 1.3]
-                              )
-            cols[0].markdown("**Aが良い**", unsafe_allow_html=True)
+                    # カラム配置: [label, btn1, btn2, btn3, btn4, btn5, label]
+                    cols = st.columns([1.3, 0.8, 0.8, 0.8, 0.8, 0.8, 1.3]
+                                    )
+                    cols[0].markdown("**Aが良い**", unsafe_allow_html=True)
 
-            slider_value = st.select_slider(
-                "評価スコア",
-                options=local_options,
-                value=st.session_state.get(key, local_options[2]),
-                key=f"slider_{key}",
-                label_visibility="collapsed",
-                format_func=lambda _: "",
-            )
-            st.session_state[key] = slider_value
+                    slider_value = st.select_slider(
+                        "評価スコア",
+                        options=local_options,
+                        value=st.session_state.get(key, local_options[2]),
+                        key=f"slider_{key}",
+                        label_visibility="collapsed",
+                        format_func=lambda _: "",
+                    )
+                    st.session_state[key] = slider_value
 
-            cols[6].markdown("**Bが良い**", unsafe_allow_html=True)
+                    cols[6].markdown("**Bが良い**", unsafe_allow_html=True)
 
-            # 選択された値を正規化して保存（baseline_on_left=Falseのとき逆転させる）
-            selected_value = st.session_state.get(key, local_options[2])
-            if baseline_on_left:
-                responses[field] = selected_value
-            else:
-                # local_options が逆転しているため、RATING_SCALE での正規値に戻す
-                idx = local_options.index(selected_value)
-                responses[field] = RATING_SCALE[idx]
+                    # 選択された値を正規化して保存（baseline_on_left=Falseのとき逆転させる）
+                    selected_value = st.session_state.get(key, local_options[2])
+                    if baseline_on_left:
+                        responses[field] = selected_value
+                    else:
+                        # local_options が逆転しているため、RATING_SCALE での正規値に戻す
+                        idx = local_options.index(selected_value)
+                        responses[field] = RATING_SCALE[idx]
 
-            st.divider()
+                    st.divider()
 
-        st.markdown("**ステップ8：コメント（任意）**")
-        comment = st.text_area(
-            "各解答について、改善点や感想があればご記入ください。",
-            height=120,
-            key=f"comment_{current_index}_{participant_key}",
-        )
+                st.markdown("**ステップ8：コメント（任意）**")
+                comment = st.text_area(
+                    "各解答について、改善点や感想があればご記入ください。",
+                    height=120,
+                    key=f"comment_{current_index}_{participant_key}",
+                )
 
-        if st.button("評価を保存して次へ ▶", use_container_width=True):
-            record = {
-                "timestamp": datetime.now().isoformat(),
-                "user_id": user_id,
-                "item_index": current_index,
-                "source_userid": row["source_userid"],
-                "baseline_on_left": baseline_on_left,
-                **survey_answers,
-                **responses,
-                "comment": comment,
-            }
-            save_response(record)
-            st.session_state.current_index = get_next_index(
-                all_indices, answered | {current_index}
-            )
-            st.success("評価を保存しました！次のサンプルに進みます。")
-            st.rerun()
+                # 【修正点2】余白の確保（ギリギリで見切れるのを防ぐ）
+                st.write("") 
+                st.write("")
+
+                # 【修正点3】通常の st.button ではなく st.form_submit_button を使う
+                submitted = st.form_submit_button("評価を保存して次へ ▶", use_container_width=True)
+
+                if submitted:
+                    # formが送信されたタイミングで値を収集して保存処理を行う
+                    
+                    # スライダーの値を回収
+                    for field, _, _ in questions:
+                        key = f"{field}_{current_index}_{participant_key}"
+                        # フォーム送信時は session_state["slider_..."] に最新の値が入っている
+                        # ただし key名が "slider_{key}" なので注意して取得
+                        val = st.session_state.get(f"slider_{key}")
+                        
+                        if baseline_on_left:
+                            responses[field] = val
+                        else:
+                            idx = local_options.index(val)
+                            responses[field] = RATING_SCALE[idx]
+
+                    record = {
+                        "timestamp": datetime.now().isoformat(),
+                        "user_id": user_id,
+                        "item_index": current_index,
+                        "source_userid": row["source_userid"],
+                        "baseline_on_left": baseline_on_left,
+                        **survey_answers,
+                        **responses,
+                        "comment": comment,
+                    }
+                    save_response(record)
+                    
+                    # 次のインデックスへ
+                    st.session_state.current_index = get_next_index(
+                        all_indices, answered | {current_index}
+                    )
+                    st.success("評価を保存しました！次のサンプルに進みます。")
+                    st.rerun()
+
+                # if st.button("評価を保存して次へ ▶", use_container_width=True):
+                #     record = {
+                #         "timestamp": datetime.now().isoformat(),
+                #         "user_id": user_id,
+                #         "item_index": current_index,
+                #         "source_userid": row["source_userid"],
+                #         "baseline_on_left": baseline_on_left,
+                #         **survey_answers,
+                #         **responses,
+                #         "comment": comment,
+                #     }
+                #     save_response(record)
+                #     st.session_state.current_index = get_next_index(
+                #         all_indices, answered | {current_index}
+                #     )
+                #     st.success("評価を保存しました！次のサンプルに進みます。")
+                #     st.rerun()
 
 
 if __name__ == "__main__":
