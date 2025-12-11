@@ -130,34 +130,58 @@ def load_json_dict(path: Path) -> Dict[str, Any]:
 
 
 # ===== 結果の読み書き（スプレッドシート版に変更） =====
+# app.py の load_answered_indices 関数をこれに置き換える
+
 def load_answered_indices(user_id: str) -> set[int]:
-    """スプレッドシートから回答済みの item_index を取得する"""
+    """スプレッドシートから回答済みの item_index を取得する（型変換対応版）"""
     worksheet = get_worksheet()
     
     try:
-        # 全データを取得（辞書のリスト形式）
+        # 全データを取得
         records = worksheet.get_all_records()
         if not records:
             return set()
         
         df = pd.DataFrame(records)
         
-        # user_id が一致する行をフィルタリング
-        # カラム名が多少違っても対応できるようにしておく
+        # カラム名の揺らぎを吸収（user_id か userid か）
+        user_col = None
         if "user_id" in df.columns:
-            user_df = df[df["user_id"] == user_id]
+            user_col = "user_id"
         elif "userid" in df.columns:
-            user_df = df[df["userid"] == user_id]
-        else:
-            return set()
+            user_col = "userid"
             
+        if user_col is None:
+            return set()
+
+        # 【重要】データフレーム側と入力側の両方を「文字列」に強制変換して比較する
+        # これにより 123(int) と "123"(str) の不一致を防ぐ
+        df[user_col] = df[user_col].astype(str).str.strip()
+        target_user_id = str(user_id).strip()
+        
+        user_df = df[df[user_col] == target_user_id]
+            
+        # item_index が存在するか確認
+        idx_col = None
         if "item_index" in user_df.columns:
-            return set(user_df["item_index"].astype(int).tolist())
+            idx_col = "item_index"
+        elif "item_index" in df.columns: # 全体から探す
+            idx_col = "item_index"
+            
+        if idx_col:
+            # 空文字や欠損を除外して int に変換
+            return set(
+                pd.to_numeric(user_df[idx_col], errors='coerce')
+                .dropna()
+                .astype(int)
+                .tolist()
+            )
         
         return set()
         
     except Exception as e:
-        # ヘッダーが無いなどのエラー時はまだデータがないとみなす
+        # デバッグ用にエラーを表示したければコメントアウトを外す
+        # st.error(f"読み込みエラー: {e}")
         return set()
 
 def save_response(record: Dict[str, Any]) -> None:
