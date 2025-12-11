@@ -6,6 +6,8 @@ import random
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 # ===== パスと定数 =====
 RESULTS_PATH = Path("results/abtest_results.jsonl")
