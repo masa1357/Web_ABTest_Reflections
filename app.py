@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from typing import Any, Dict, List, Optional, Tuple
 
 # ===== パスと定数 =====
 RESULTS_PATH = Path("results/abtest_results.jsonl")
@@ -286,122 +287,52 @@ def load_items(max_items: int = MAX_ITEMS, *, user_id: str | None = None) -> pd.
     df = pd.DataFrame(records).sort_values("item_index").reset_index(drop=True)
     return df
 
-
-# ===== 結果の読み書き =====
-def load_answered_indices(user_id: str) -> set[int]:
-    """すでに回答済みの item_index の集合を返す。results の列名差異に頑健に対応する。"""
-    if not RESULTS_PATH.exists():
-        return set()
-
+# ===== ユーザーデータ管理（進捗読み込み＆プロフィール復元） =====
+def load_user_data(user_id: str) -> Tuple[set[int], Optional[Dict[str, str]]]:
+    """
+    指定されたuser_idに関連するデータをスプレッドシートから全検索する。
+    戻り値: (回答済みindexの集合, 最後に保存されたプロフィール情報の辞書)
+    """
+    worksheet = get_worksheet()
     try:
-        df = pd.read_json(RESULTS_PATH, lines=True)
-    except Exception:
-        # JSONL 読み込みに失敗したら行ごとにパースして探索
-        records = []
-        try:
-            with RESULTS_PATH.open(encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
+        records = worksheet.get_all_records()
+        if not records:
+            return set(), None
+        
+        target_uid_str = str(user_id).strip()
+        answered_indices = set()
+        last_profile = None
+
+        # シンプルに全行ループして、user_idが一致するものを探す
+        for row in records:
+            # カラム名の揺らぎ対応
+            row_uid = row.get("user_id") or row.get("userid") or ""
+            
+            # 文字列化して空白除去して比較（これが最も確実）
+            if str(row_uid).strip() == target_uid_str:
+                
+                # 回答済みインデックスを回収
+                idx_val = row.get("item_index")
+                if idx_val is not None and str(idx_val).strip() != "":
                     try:
-                        records.append(json.loads(line))
-                    except Exception:
-                        continue
-        except Exception:
-            return set()
+                        answered_indices.add(int(idx_val))
+                    except ValueError:
+                        pass
+                
+                # プロフィール情報を保持（上書きしていくので最後に見つかったものが最新になる）
+                # 値が空でない場合のみ取得するようにする
+                if row.get("kyushu_student"):
+                    last_profile = {
+                        "kyushu_student": row.get("kyushu_student"),
+                        "info_course_taken": row.get("info_course_taken"),
+                        "info_course_grade": row.get("info_course_grade")
+                    }
 
-        indices = set()
-        ITEM_CANDIDATES = ("item_index", "item", "index", "itemIdx", "itemId")
-        for rec in records:
-            # user_id 相当フィールドが一致するか探す
-            matched = False
-            for k in (
-                "user_id",
-                "userid",
-                "user",
-                "worker_id",
-                "participant",
-                "source_userid",
-            ):
-                if k in rec and rec[k] == user_id:
-                    matched = True
-                    break
-            if not matched:
-                # 値レベルで一致を探す（稀なケース）
-                for v in rec.values():
-                    if isinstance(v, str) and v == user_id:
-                        matched = True
-                        break
-            if not matched:
-                continue
-            # item index を探して追加
-            for k in ITEM_CANDIDATES:
-                if k in rec:
-                    try:
-                        indices.add(int(rec[k]))
-                        break
-                    except Exception:
-                        continue
-        return indices
-
-    # DataFrame 読み込み成功時：候補列名を探す
-    USER_CANDIDATES = [
-        "user_id",
-        "userid",
-        "user",
-        "worker_id",
-        "participant",
-        "source_userid",
-    ]
-    ITEM_CANDIDATES = ["item_index", "item", "index", "itemIdx", "itemId"]
-
-    user_col = next((c for c in USER_CANDIDATES if c in df.columns), None)
-    item_col = next((c for c in ITEM_CANDIDATES if c in df.columns), None)
-
-    if user_col is not None and item_col is not None:
-        try:
-            df_user = df[df[user_col] == user_id]
-            return set(int(x) for x in df_user[item_col].dropna().astype(int).tolist())
-        except Exception:
-            return set()
-
-    # 列名が混在している場合はレコード単位で探索
-    indices = set()
-    for _, row in df.iterrows():
-        matched = False
-        if user_col is not None:
-            val = row.get(user_col)
-            if isinstance(val, str) and val == user_id:
-                matched = True
-        else:
-            for c, val in row.items():
-                if isinstance(val, str) and val == user_id:
-                    matched = True
-                    break
-        if not matched:
-            continue
-
-        if item_col is not None:
-            try:
-                indices.add(int(row.get(item_col)))
-                continue
-            except Exception:
-                pass
-        for c in ITEM_CANDIDATES:
-            if c in row.index:
-                try:
-                    indices.add(int(row[c]))
-                    break
-                except Exception:
-                    continue
-        try:
-            if "item_index" in row.index and pd.notna(row["item_index"]):
-                indices.add(int(row["item_index"]))
-        except Exception:
-            pass
-
-    return indices
+        return answered_indices, last_profile
+        
+    except Exception as e:
+        print(f"Error loading user data: {e}")
+        return set(), None
 
 
 
@@ -461,38 +392,42 @@ def main():
         st.warning("名前を入力すると評価を開始できます。")
         st.stop()
 
-    # 参加者IDが変わったら状態を初期化
+
+    # ユーザーIDが入力されたら、スプレッドシートからデータを取得
+    # ここで「回答済みセット」と「過去のプロフィール」を一括取得
+    answered, prev_profile = load_user_data(user_id)
+
+    # ユーザー切り替え時のセッション初期化
     if st.session_state.get("current_user_id") != user_id:
         st.session_state.current_user_id = user_id
         st.session_state.current_index = None
         st.session_state.survey_answers = None
+        
+        # ウィジェットのキーを削除してリセットさせる
         for widget_key in ("kyushu_student", "info_course_taken", "info_grade_text"):
-            st.session_state.pop(widget_key, None)
+            if widget_key in st.session_state:
+                del st.session_state[widget_key]
+        
+        # ★ここで過去のプロフィールがあればセッションにセット（自動入力）★
+        if prev_profile:
+            st.toast("過去のプロフィール情報を復元しました", icon="✅")
+            st.session_state["kyushu_student"] = prev_profile.get("kyushu_student")
+            st.session_state["info_course_taken"] = prev_profile.get("info_course_taken")
+            st.session_state["info_grade_text"] = prev_profile.get("info_course_grade")
 
     st.subheader("パーソナリティ質問")
     kyushu_options = ["-- 選択してください --", "はい", "いいえ"]
-    kyushu_student = st.selectbox(
-        "九州大学の学生ですか？", kyushu_options, index=0, key="kyushu_student"
-    )
+    
+    # keyを指定しているので、session_stateに値が入っていればそれが初期値になる
+    kyushu_student = st.selectbox("九州大学の学生ですか？", kyushu_options, key="kyushu_student")
 
     info_course_options = ["-- 選択してください --", "はい", "いいえ"]
-    info_course_taken = st.selectbox(
-        "情報科学の講義を受講したことがありますか？",
-        info_course_options,
-        index=0,
-        key="info_course_taken",
-    )
-    info_course_grade = st.selectbox(
-        "受講していたときの成績（任意）",
-        options=["未回答", "A", "B", "C", "D", "F"],
-        index=0,
-        key="info_grade_text",
-    )
+    info_course_taken = st.selectbox("情報科学の講義を受講したことがありますか？", info_course_options, key="info_course_taken")
+    
+    grade_options = ["未回答", "A", "B", "C", "D", "F"]
+    info_course_grade = st.selectbox("受講していたときの成績（任意）", options=grade_options, key="info_grade_text")
 
-    if (
-        kyushu_student == kyushu_options[0]
-        or info_course_taken == info_course_options[0]
-    ):
+    if kyushu_student == kyushu_options[0] or info_course_taken == info_course_options[0]:
         st.warning("必須のアンケート項目に回答してください。")
         st.stop()
 
@@ -503,24 +438,18 @@ def main():
     }
     st.session_state.survey_answers = survey_answers
 
-    # 参加者ごとに決定的にシャッフルされた順序でアイテムを取得
     df_items = load_items(user_id=user_id)
     if df_items.empty:
-        st.error(
-            "正しくロードできる評価対象がありません。userid のリストや JSON の内容をご確認ください。"
-        )
+        st.error("正しくロードできる評価対象がありません。")
         st.stop()
 
-    answered = load_answered_indices(user_id)
     all_indices = list(df_items["item_index"])
     if st.session_state.get("current_index") is None:
         st.session_state.current_index = get_next_index(all_indices, answered)
 
     current_index = st.session_state.current_index
     if current_index is None:
-        st.success(
-            f"この参加者IDでは全 {len(df_items)} 件の比較が完了しています。ご協力ありがとうございました。"
-        )
+        st.success(f"この参加者IDでは全 {len(df_items)} 件の比較が完了しています。ご協力ありがとうございました。")
         st.stop()
 
     row = df_items.loc[df_items["item_index"] == current_index].iloc[0]
