@@ -12,6 +12,14 @@ RESULTS_PATH = Path("results/abtest_results.jsonl")
 BASELINE_PATH = Path("data/phase1_responses_to10step_20251211.json")
 ADVICE_PATH = Path("data/phase2_advice_to10step_20251210.json")
 
+# 保存するデータのカラム順序（スプレッドシートのヘッダーになります）
+CSV_COLUMNS = [
+    "timestamp", "user_id", "item_index", "source_userid", "baseline_on_left",
+    "kyushu_student", "info_course_taken", "info_course_grade",
+    "accuracy", "readability", "persuasiveness", "actionability",
+    "hallucination", "usefulness", "overall", "comment"
+]
+
 # ABテスト対象とする userid のサンプル一覧（順序は後でシャッフルされる）
 correct_uid = [
     'C-2021-2_U40',
@@ -70,16 +78,106 @@ RATING_SCALE = [
     "B が強く良い",
 ]
 
+# ===== スプレッドシート接続機能 =====
+@st.cache_resource
+def get_worksheet():
+    """Secretsから認証情報を読み込み、スプレッドシートのワークシートオブジェクトを返す"""
+    # Secretsから認証情報を取得
+    if "gcp_service_account" not in st.secrets:
+        st.error("Secretsに gcp_service_account が設定されていません。")
+        st.stop()
+    
+    # 認証スコープ
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    
+    # 辞書オブジェクトからCredentialsを作成
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    client = gspread.authorize(creds)
+    
+    # スプレッドシートを開く
+    spreadsheet_id = st.secrets["spreadsheet_id"]
+    try:
+        sh = client.open_by_key(spreadsheet_id)
+        # 1枚目のシートを使用（なければ作るなどの処理も可能だが今回はsheet1固定）
+        worksheet = sh.sheet1
+        return worksheet
+    except Exception as e:
+        st.error(f"スプレッドシートへの接続に失敗しました: {e}")
+        st.stop()
 
-# ===== データロード =====
+def init_sheet_header(worksheet):
+    """シートが空の場合、ヘッダー行を追加する"""
+    try:
+        existing = worksheet.get_all_values()
+        if not existing:
+            worksheet.append_row(CSV_COLUMNS)
+    except Exception:
+        pass
+
+# ===== データロード（変更なし） =====
 def load_json_dict(path: Path) -> Dict[str, Any]:
-    """JSONファイルを辞書としてロードする。"""
     if not path.exists():
         st.error(f"データファイルが見つかりません: {path}")
         st.stop()
     with path.open(encoding="utf-8") as f:
         return json.load(f)
 
+
+# ===== 結果の読み書き（スプレッドシート版に変更） =====
+def load_answered_indices(user_id: str) -> set[int]:
+    """スプレッドシートから回答済みの item_index を取得する"""
+    worksheet = get_worksheet()
+    
+    try:
+        # 全データを取得（辞書のリスト形式）
+        records = worksheet.get_all_records()
+        if not records:
+            return set()
+        
+        df = pd.DataFrame(records)
+        
+        # user_id が一致する行をフィルタリング
+        # カラム名が多少違っても対応できるようにしておく
+        if "user_id" in df.columns:
+            user_df = df[df["user_id"] == user_id]
+        elif "userid" in df.columns:
+            user_df = df[df["userid"] == user_id]
+        else:
+            return set()
+            
+        if "item_index" in user_df.columns:
+            return set(user_df["item_index"].astype(int).tolist())
+        
+        return set()
+        
+    except Exception as e:
+        # ヘッダーが無いなどのエラー時はまだデータがないとみなす
+        return set()
+
+def save_response(record: Dict[str, Any]) -> None:
+    """回答1件をスプレッドシートに追記する"""
+    worksheet = get_worksheet()
+    
+    # 初回だけヘッダーチェック
+    init_sheet_header(worksheet)
+    
+    # 定義したカラム順序に従って値をリスト化する
+    row_values = []
+    for col in CSV_COLUMNS:
+        row_values.append(record.get(col, ""))
+    
+    # 追記
+    worksheet.append_row(row_values)
+
+def get_next_index(all_indices: List[int], answered: set[int]) -> int | None:
+    for idx in all_indices:
+        if idx not in answered:
+            return idx
+    return None
 
 # ...existing code...
 def load_items(max_items: int = MAX_ITEMS, *, user_id: str | None = None) -> pd.DataFrame:
@@ -280,26 +378,16 @@ def load_answered_indices(user_id: str) -> set[int]:
     return indices
 
 
-def save_response(record: Dict[str, Any]) -> None:
-    """回答1件を JSON Lines 形式で追記保存する。"""
-    RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with RESULTS_PATH.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
-def get_next_index(all_indices: List[int], answered: set[int]) -> int | None:
-    """未回答の item_index を小さい順に1つ返す。"""
-    for idx in all_indices:
-        if idx not in answered:
-            return idx
-    return None
-
 
 # ===== Streamlit アプリ本体 =====
 def main():
     st.set_page_config(
         page_title="Feedback A/B Test", layout="wide", initial_sidebar_state="collapsed"
     )
+
+    # 最初にスプレッドシート接続テスト＆ヘッダー初期化
+    ws = get_worksheet()
+    init_sheet_header(ws)
 
     df_preview = load_items()
     if df_preview.empty:

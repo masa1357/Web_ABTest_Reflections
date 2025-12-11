@@ -4,3 +4,5 @@ numpy>=1.26
 pandas>=2.2
 scipy>=1.13
 streamlit>=1.37
+gspread
+oauth2client
