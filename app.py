@@ -598,7 +598,7 @@ def main():
                         st.session_state[key] = local_options[2]
 
                     # カラム配置
-                    cols = st.columns([1.3, 0.8, 0.8, 0.8, 0.8, 0.8, 1.3])
+                    cols = st.columns([1.5, 0.8, 0.8, 0.8, 0.8, 0.8, 1.5])
                     cols[0].markdown("**Aが良い**", unsafe_allow_html=True)
 
                     # スライダー表示（ここで値は取得せず、表示のみ行う）
