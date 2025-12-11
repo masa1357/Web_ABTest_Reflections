@@ -1,7 +1,7 @@
 ,Baseline (A) 勝利,同程度,Ours (B) 勝利
-usefulness,3,0,0
-readability,3,0,0
-persuasiveness,3,0,0
-actionability,3,0,0
-hallucination,3,0,0
-overall,3,0,0
+usefulness,0,7,13
+readability,1,14,5
+persuasiveness,0,11,9
+actionability,1,7,12
+hallucination,0,9,11
+overall,0,8,12

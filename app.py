@@ -9,9 +9,59 @@ from typing import Any, Dict, List
 
 # ===== パスと定数 =====
 RESULTS_PATH = Path("results/abtest_results.jsonl")
-BASELINE_PATH = Path("data/phase1_responses_to10step_20251210.json")
+BASELINE_PATH = Path("data/phase1_responses_to10step_20251211.json")
 ADVICE_PATH = Path("data/phase2_advice_to10step_20251210.json")
-MAX_ITEMS = 10
+
+# ABテスト対象とする userid のサンプル一覧（順序は後でシャッフルされる）
+correct_uid = [
+    'C-2021-2_U40',
+    # 'C-2022-1_U75',
+    # 'C-2021-1_U76',
+    # 'C-2021-2_U88',
+    # 'C-2021-2_U35',
+    # 'C-2021-2_U148',
+    'C-2021-2_U133',
+    # 'C-2021-2_U76',
+    # 'C-2022-1_U85',
+    # 'C-2021-2_U57',
+    # 'C-2021-2_U42',
+    'C-2022-1_U80',
+    # 'C-2021-2_U85',
+    'C-2021-1_U46',
+    # 'C-2021-1_U52',
+    # 'C-2021-2_U113',
+    'C-2021-2_U164',
+    # 'C-2022-1_U86',
+    # 'C-2021-2_U140',
+    'C-2021-2_U81',
+    # 'C-2021-1_U78',
+    'C-2021-1_U66',
+    'C-2021-2_U12',
+    'C-2021-2_U82',
+    # 'C-2021-2_U134',
+    'C-2021-1_U17',
+    # 'C-2021-2_U4',
+    # 'C-2021-2_U91',
+    # 'C-2021-2_U166',
+    # 'C-2021-1_U21',
+]
+
+incorrect_uid = [
+    'C-2021-2_U115',
+    'C-2022-1_U52',
+    'C-2021-1_U43',
+    'C-2022-1_U6',
+    'C-2022-1_U29',
+    'C-2022-1_U61',
+    'C-2021-1_U97',
+    'C-2022-1_U92',
+    'C-2021-2_U149',
+    'C-2021-2_U1']
+
+use_uid = correct_uid + incorrect_uid
+
+# correct_uid をすべて出題するのが基本。部分出題したい場合は max_items を明示的に指定する。
+MAX_ITEMS = len(use_uid)
 RATING_SCALE = [
     "A が強く良い",
     "A がやや良い",
@@ -32,11 +82,10 @@ def load_json_dict(path: Path) -> Dict[str, Any]:
 
 
 # ...existing code...
-def load_items(max_items: int = MAX_ITEMS) -> pd.DataFrame:
+def load_items(max_items: int = MAX_ITEMS, *, user_id: str | None = None) -> pd.DataFrame:
     """baseline応答とstudent adviceをペアにしたDataFrameを返す。
-    マッチングは以下の優先順位で行う:
-      1. トップレベルのキーが一致するもの
-      2. 各エントリ内の 'userid' / 'user_id' が一致するもの（重複は先に見つかったものを採用）
+    - 基本は correct_uid に含まれる userid のみを対象とし、なければ共通集合を使う
+    - user_id を指定した場合は、その文字列に基づく決定的な乱数シードで出題順をシャッフルする
     """
     baseline = load_json_dict(BASELINE_PATH)
     advice = load_json_dict(ADVICE_PATH)
@@ -69,11 +118,28 @@ def load_items(max_items: int = MAX_ITEMS) -> pd.DataFrame:
         # トップレベル一致がなければ entry 内 userid でマッチさせる
         common_userids = sorted(set(base_map.keys()) & set(advice_map.keys()))
 
-    if not common_userids:
+    # use_uid にあるものを優先し、重複を排除
+    prioritized_uids: List[str] = []
+    if use_uid:
+        for uid in use_uid:
+            if uid in common_userids and uid not in prioritized_uids:
+                prioritized_uids.append(uid)
+    else:
+        prioritized_uids = list(common_userids)
+
+    if not prioritized_uids:
         return pd.DataFrame()
 
+    items_order = prioritized_uids[:max_items]
+    if user_id:
+        seed = int.from_bytes(
+            hashlib.sha256(f"order_{user_id}".encode("utf-8")).digest()[:8], "big"
+        )
+        rng = random.Random(seed)
+        rng.shuffle(items_order)
+
     records: List[Dict[str, Any]] = []
-    for idx, uid in enumerate(common_userids[:max_items]):
+    for idx, uid in enumerate(items_order):
         base_entry = base_map.get(uid, {})
         advice_entry = advice_map.get(uid, {})
         records.append(
@@ -235,8 +301,8 @@ def main():
         page_title="Feedback A/B Test", layout="wide", initial_sidebar_state="collapsed"
     )
 
-    df_items = load_items()
-    if df_items.empty:
+    df_preview = load_items()
+    if df_preview.empty:
         st.error(
             "比較対象となるデータが見つかりません。dataフォルダのJSONを確認してください。"
         )
@@ -250,10 +316,10 @@ def main():
             f"""
 このアプリでは、「情報科学」を受講した学生に対するフィードバックを比較評価していただきます。
 
-- 評価するフィードバックは {len(df_items)} 件ございます。
+- 評価するフィードバックは {len(df_preview)} 件あります。
 - 回答前に簡単なパーソナリティ設問へ回答してもらいます。
-- 各サンプルについて6項目（有用性/可読性/説得力/行動可能性/ハルシネーション/総合評価）で、A・Bいずれが優れているか、もしくは同程度かを選択いただきます。
-- {len(df_items)} 件すべて回答すると終了です。同じ名前でアクセスすれば途中から再開できます。
+- 各サンプルについて7項目（正確さ/可読性/説得力/行動可能性/ハルシネーション/有用性/総合評価）で、A・Bいずれが優れているか、もしくは同程度かを選択いただきます。
+- {len(df_preview)} 件すべて回答すると終了です。同じ名前でアクセスすれば途中から再開できます。
 
 """
         )
@@ -316,6 +382,14 @@ def main():
     }
     st.session_state.survey_answers = survey_answers
 
+    # 参加者ごとに決定的にシャッフルされた順序でアイテムを取得
+    df_items = load_items(user_id=user_id)
+    if df_items.empty:
+        st.error(
+            "正しくロードできる評価対象がありません。userid のリストや JSON の内容をご確認ください。"
+        )
+        st.stop()
+
     answered = load_answered_indices(user_id)
     all_indices = list(df_items["item_index"])
     if st.session_state.get("current_index") is None:
@@ -324,7 +398,7 @@ def main():
     current_index = st.session_state.current_index
     if current_index is None:
         st.success(
-            "この参加者IDでは10件すべての比較が完了しています。ご協力ありがとうございました。"
+            f"この参加者IDでは全 {len(df_items)} 件の比較が完了しています。ご協力ありがとうございました。"
         )
         st.stop()
 
@@ -376,9 +450,10 @@ def main():
 
         questions = [
             (
-                "usefulness",
-                "ステップ1：有用性",
-                "あなたが学生だった場合、どちらのフィードバックが役に立つと思いますか？",
+                # 正確さ：学生の成績と発言内容の整合性を確認してもらう
+                "accuracy",
+                "ステップ1：正確さ",
+                "学生の成績とフィードバック内の発言内容は一致していると思いますか？",
             ),
             ("readability", "ステップ2：可読性", "どちらが読みやすいと感じますか？"),
             (
@@ -397,8 +472,13 @@ def main():
                 "データに基づく回答に見えますか？",
             ),
             (
+                "usefulness",
+                "ステップ6：有用性",
+                "あなたが学生だった場合、どちらのフィードバックが役に立つと思いますか？",
+            ),
+            (
                 "overall",
-                "ステップ6：総合評価",
+                "ステップ7：総合評価",
                 "総合的に見て、どちらが良いと思いますか？",
             ),
         ]
@@ -416,37 +496,19 @@ def main():
                 st.session_state[key] = local_options[2]
 
             # カラム配置: [label, btn1, btn2, btn3, btn4, btn5, label]
-            cols = st.columns([1.2, 0.9, 0.9, 0.9, 0.9, 0.9, 1.2])
+            cols = st.columns([1.3, 1.0, 1.0, 1.0, 1.0, 1.0, 1.3]
+                              )
             cols[0].markdown("**Aが良い**", unsafe_allow_html=True)
 
-            # 各ボタンの表示シンボル（外側は大きめ、中央は小さめ）
-            for i in range(5):
-                col = cols[i + 1]
-                option = local_options[i]
-                selected = st.session_state.get(key) == option
-
-                # シンボル選択（見た目の差を Unicode で調整）
-                if i in (0, 4):
-                    # 外側 大きめ
-                    sym = "⬤" if selected else "◯"
-                elif i == 2:
-                    # 中央 少し小さめ
-                    sym = "●" if selected else "○"
-                else:
-                    # 中間は標準サイズ
-                    sym = "●" if selected else "○"
-
-                btn_key = f"btn_{key}_{i}"
-
-                # コールバックを作成（閉包の値を固定）
-                def _make_cb(k=key, opt=option):
-                    def _cb():
-                        st.session_state[k] = opt
-
-                    return _cb
-
-                # ボタン表示（ラベルはシンボルのみ）
-                col.button(sym, key=btn_key, on_click=_make_cb())
+            slider_value = st.select_slider(
+                "評価スコア",
+                options=local_options,
+                value=st.session_state.get(key, local_options[2]),
+                key=f"slider_{key}",
+                label_visibility="collapsed",
+                format_func=lambda _: "",
+            )
+            st.session_state[key] = slider_value
 
             cols[6].markdown("**Bが良い**", unsafe_allow_html=True)
 
@@ -461,7 +523,7 @@ def main():
 
             st.divider()
 
-        st.markdown("**ステップ7：コメント（任意）**")
+        st.markdown("**ステップ8：コメント（任意）**")
         comment = st.text_area(
             "各解答について、改善点や感想があればご記入ください。",
             height=120,
