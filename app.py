@@ -5,49 +5,70 @@ import hashlib
 import random
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+import re
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib  # type: ignore  # Python 3.10 fallback
+    except ModuleNotFoundError:
+        tomllib = None
+
 # ===== パスと定数 =====
 RESULTS_PATH = Path("results/abtest_results.jsonl")
-BASELINE_PATH = Path("data/phase1_responses_to10step_20251211.json")
-ADVICE_PATH = Path("data/phase2_advice_to10step_20251210.json")
+BASELINE_PATH = Path("data/worse2.json")
+ADVICE_PATH = Path("data/better_phase2_format.json")
 
 # 保存するデータのカラム順序（スプレッドシートのヘッダーになります）
 CSV_COLUMNS = [
-    "timestamp", "user_id", "item_index", "source_userid", "baseline_on_left",
-    "kyushu_student", "info_course_taken", "info_course_grade",
-    "accuracy", "readability", "persuasiveness", "actionability",
-    "hallucination", "usefulness", "overall", "comment"
+    "timestamp",
+    "user_id",
+    "item_index",
+    "source_userid",
+    "baseline_on_left",
+    "kyushu_student",
+    "info_course_taken",
+    "info_course_grade",
+    "accuracy",
+    "readability",
+    "persuasiveness",
+    "actionability",
+    "hallucination",
+    "usefulness",
+    "overall",
+    "comment",
 ]
 
 # ABテスト対象とする userid のサンプル一覧（順序は後でシャッフルされる）
 correct_uid = [
-    'C-2022-1_U57'
-    'C-2022-1_U73'
-    'C-2021-1_U8'
-    'C-2021-2_U35'
-    'C-2021-2_U161'
-    'C-2021-2_U23'
-    'C-2021-1_U29'
-    'C-2021-1_U66', 
-    'C-2021-1_U21', 
-    'C-2021-2_U172'
+    "C-2022-1_U57"
+    "C-2022-1_U73"
+    "C-2021-1_U8"
+    "C-2021-2_U35"
+    "C-2021-2_U161"
+    "C-2021-2_U23"
+    "C-2021-1_U29"
+    "C-2021-1_U66",
+    "C-2021-1_U21",
+    "C-2021-2_U172",
 ]
 
 incorrect_uid = [
-    'C-2021-2_U115',
-    'C-2022-1_U52',
-    'C-2021-1_U43',
-    'C-2022-1_U6',
-    'C-2022-1_U29',
-    'C-2022-1_U61',
-    'C-2021-1_U97',
-    'C-2022-1_U92',
-    'C-2021-2_U149',
-    'C-2021-2_U1']
+    "C-2021-2_U115",
+    "C-2022-1_U52",
+    "C-2021-1_U43",
+    "C-2022-1_U6",
+    "C-2022-1_U29",
+    "C-2022-1_U61",
+    "C-2021-1_U97",
+    "C-2022-1_U92",
+    "C-2021-2_U149",
+    "C-2021-2_U1",
+]
 
 use_uid = correct_uid + incorrect_uid
 
@@ -61,28 +82,61 @@ RATING_SCALE = [
     "B が強く良い",
 ]
 
+
 # ===== スプレッドシート接続機能 =====
+@st.cache_resource
+def load_app_secrets() -> Dict[str, Any]:
+    """st.secrets を優先し、無ければ config/secrets.toml を読み込む"""
+    secrets: Dict[str, Any] = {}
+    try:
+        secrets.update(dict(st.secrets))
+    except Exception:
+        pass
+
+    required_keys = ("gcp_service_account", "spreadsheet_id")
+    if all(k in secrets for k in required_keys):
+        return secrets
+
+    config_path = Path("config/secrets.toml")
+    if config_path.exists():
+        if tomllib is None:
+            st.error("config/secrets.toml を読むには tomllib/tomli が必要です。")
+            st.stop()
+        with config_path.open("rb") as f:
+            file_secrets = tomllib.load(f)
+        # st.secrets を優先し、足りないキーだけ補完
+        for key in required_keys:
+            if key not in secrets and key in file_secrets:
+                secrets[key] = file_secrets[key]
+
+    return secrets
+
+
 @st.cache_resource
 def get_worksheet():
     """Secretsから認証情報を読み込み、スプレッドシートのワークシートオブジェクトを返す"""
-    # Secretsから認証情報を取得
-    if "gcp_service_account" not in st.secrets:
-        st.error("Secretsに gcp_service_account が設定されていません。")
+    secrets = load_app_secrets()
+
+    # Secretsから認証情報を取得（st.secrets 優先、無ければ config/secrets.toml）
+    if "gcp_service_account" not in secrets:
+        st.error(
+            "Secretsに gcp_service_account が設定されていません。（config/secrets.toml も確認済み）"
+        )
         st.stop()
-    
+
     # 認証スコープ
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
     ]
-    
+
     # 辞書オブジェクトからCredentialsを作成
-    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds_dict = dict(secrets["gcp_service_account"])
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
-    
+
     # スプレッドシートを開く
-    spreadsheet_id = st.secrets["spreadsheet_id"]
+    spreadsheet_id = secrets["spreadsheet_id"]
     try:
         sh = client.open_by_key(spreadsheet_id)
         # 1枚目のシートを使用（なければ作るなどの処理も可能だが今回はsheet1固定）
@@ -91,6 +145,7 @@ def get_worksheet():
     except Exception as e:
         st.error(f"スプレッドシートへの接続に失敗しました: {e}")
         st.stop()
+
 
 def init_sheet_header(worksheet):
     """シートが空の場合、ヘッダー行を追加する"""
@@ -101,6 +156,7 @@ def init_sheet_header(worksheet):
     except Exception:
         pass
 
+
 # ===== データロード（変更なし） =====
 def load_json_dict(path: Path) -> Dict[str, Any]:
     if not path.exists():
@@ -110,28 +166,73 @@ def load_json_dict(path: Path) -> Dict[str, Any]:
         return json.load(f)
 
 
+def clean_baseline_text(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = text.strip()
+    # 先頭の "assistant" ラベルやボイラープレートを除去
+    cleaned = re.sub(r"(?i)\Aassistant\b\s*\n*", "", cleaned).strip()
+    cleaned = re.sub(
+        r"\A以下は[^\n]*?(生成文|フィードバック|改善アドバイス)[^\n]*\n+",
+        "",
+        cleaned,
+    ).strip()
+    cleaned = cleaned.replace(" �善", "改善")
+    # 見出しレベルを統一（最初の # は ###、2つ目以降は ####）
+    heading_count = 0
+    normalized_lines: List[str] = []
+    label_headings = [
+        "あなたの強み",
+        "改善が必要なポイント",
+        "これから意識したいこと",
+        "まとめ",
+    ]
+    for line in cleaned.splitlines():
+        m = re.match(r"^(\s*)(#+)\s*(.*)$", line)
+        if m:
+            leading_ws, _hashes, rest = m.groups()
+            rest_stripped = rest.strip()
+            if rest_stripped.startswith("**") and rest_stripped.endswith("】"):
+                rest = rest_stripped[2:-1].strip()
+            heading_count += 1
+            target = "###" if heading_count == 1 else "####"
+            normalized_lines.append(f"{leading_ws}{target} {rest}".rstrip())
+        else:
+            stripped = line.strip()
+            if stripped.startswith("**") and stripped.endswith("】"):
+                stripped = stripped[2:-1].strip()
+                line = stripped
+            matched = next((h for h in label_headings if stripped == h), None)
+            if matched:
+                line = line.replace(matched, f"{matched}：", 1)
+            normalized_lines.append(line)
+    cleaned = "\n".join(normalized_lines).strip()
+    return cleaned
+
+
 # ===== 結果の読み書き（スプレッドシート版に変更） =====
 # app.py の load_answered_indices 関数をこれに置き換える
+
 
 def load_answered_indices(user_id: str) -> set[int]:
     """スプレッドシートから回答済みの item_index を取得する（型変換対応版）"""
     worksheet = get_worksheet()
-    
+
     try:
         # 全データを取得
         records = worksheet.get_all_records()
         if not records:
             return set()
-        
+
         df = pd.DataFrame(records)
-        
+
         # カラム名の揺らぎを吸収（user_id か userid か）
         user_col = None
         if "user_id" in df.columns:
             user_col = "user_id"
         elif "userid" in df.columns:
             user_col = "userid"
-            
+
         if user_col is None:
             return set()
 
@@ -139,46 +240,48 @@ def load_answered_indices(user_id: str) -> set[int]:
         # これにより 123(int) と "123"(str) の不一致を防ぐ
         df[user_col] = df[user_col].astype(str).str.strip()
         target_user_id = str(user_id).strip()
-        
+
         user_df = df[df[user_col] == target_user_id]
-            
+
         # item_index が存在するか確認
         idx_col = None
         if "item_index" in user_df.columns:
             idx_col = "item_index"
-        elif "item_index" in df.columns: # 全体から探す
+        elif "item_index" in df.columns:  # 全体から探す
             idx_col = "item_index"
-            
+
         if idx_col:
             # 空文字や欠損を除外して int に変換
             return set(
-                pd.to_numeric(user_df[idx_col], errors='coerce')
+                pd.to_numeric(user_df[idx_col], errors="coerce")
                 .dropna()
                 .astype(int)
                 .tolist()
             )
-        
+
         return set()
-        
+
     except Exception as e:
         # デバッグ用にエラーを表示したければコメントアウトを外す
         # st.error(f"読み込みエラー: {e}")
         return set()
 
+
 def save_response(record: Dict[str, Any]) -> None:
     """回答1件をスプレッドシートに追記する"""
     worksheet = get_worksheet()
-    
+
     # 初回だけヘッダーチェック
     init_sheet_header(worksheet)
-    
+
     # 定義したカラム順序に従って値をリスト化する
     row_values = []
     for col in CSV_COLUMNS:
         row_values.append(record.get(col, ""))
-    
+
     # 追記
     worksheet.append_row(row_values)
+
 
 def get_next_index(all_indices: List[int], answered: set[int]) -> int | None:
     for idx in all_indices:
@@ -186,8 +289,11 @@ def get_next_index(all_indices: List[int], answered: set[int]) -> int | None:
             return idx
     return None
 
+
 # ...existing code...
-def load_items(max_items: int = MAX_ITEMS, *, user_id: str | None = None) -> pd.DataFrame:
+def load_items(
+    max_items: int = MAX_ITEMS, *, user_id: str | None = None
+) -> pd.DataFrame:
     """baseline応答とstudent adviceをペアにしたDataFrameを返す。
     - 基本は correct_uid に含まれる userid のみを対象とし、なければ共通集合を使う
     - user_id を指定した場合は、その文字列に基づく決定的な乱数シードで出題順をシャッフルする
@@ -212,6 +318,23 @@ def load_items(max_items: int = MAX_ITEMS, *, user_id: str | None = None) -> pd.
                     m[uid] = entry
         return m
 
+    def extract_baseline_response(entry: Dict[str, Any], uid: str) -> str:
+        if not isinstance(entry, dict):
+            return ""
+        if isinstance(entry.get("response"), str) and entry["response"]:
+            return entry["response"]
+        if isinstance(entry.get("text"), str) and entry["text"]:
+            return entry["text"]
+        if isinstance(entry.get(uid), str) and entry[uid]:
+            return entry[uid]
+        # worse2.json のように「grade 以外の1キーが本文」の形を想定
+        for key, val in entry.items():
+            if key in ("grade", "userid", "user_id"):
+                continue
+            if isinstance(val, str) and val:
+                return val
+        return ""
+
     base_map = build_user_map(baseline)
     advice_map = build_user_map(advice)
 
@@ -229,7 +352,8 @@ def load_items(max_items: int = MAX_ITEMS, *, user_id: str | None = None) -> pd.
         for uid in use_uid:
             if uid in common_userids and uid not in prioritized_uids:
                 prioritized_uids.append(uid)
-    else:
+    # use_uid で何も拾えなかった場合は共通集合を丸ごと使う
+    if not prioritized_uids:
         prioritized_uids = list(common_userids)
 
     if not prioritized_uids:
@@ -254,8 +378,9 @@ def load_items(max_items: int = MAX_ITEMS, *, user_id: str | None = None) -> pd.
                     "userid", base_entry.get("user_id", uid)
                 ),
                 "baseline_grade": base_entry.get("grade", ""),
-                "baseline_response": base_entry.get("response", "")
-                or base_entry.get("text", ""),
+                "baseline_response": clean_baseline_text(
+                    extract_baseline_response(base_entry, uid)
+                ),
                 "student_advice_title": advice_entry.get("student_advice_title", "")
                 or advice_entry.get("title", ""),
                 "student_advice_body": advice_entry.get("student_advice_body", "")
@@ -266,6 +391,111 @@ def load_items(max_items: int = MAX_ITEMS, *, user_id: str | None = None) -> pd.
 
     df = pd.DataFrame(records).sort_values("item_index").reset_index(drop=True)
     return df
+
+
+def debug_admin_view(user_id: str) -> bool:
+    if user_id != "admin_ms13379":
+        return False
+
+    st.title("Debug: baseline data viewer")
+    baseline = load_json_dict(BASELINE_PATH)
+    advice = load_json_dict(ADVICE_PATH)
+
+    def build_user_map(d: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        m: Dict[str, Dict[str, Any]] = {}
+        for top_key, entry in d.items():
+            candidates = [top_key]
+            if isinstance(entry, dict):
+                for fld in ("userid", "user_id"):
+                    val = entry.get(fld)
+                    if isinstance(val, str) and val:
+                        candidates.append(val)
+            for uid in candidates:
+                if uid not in m:
+                    m[uid] = entry
+        return m
+
+    base_map = build_user_map(baseline)
+    advice_map = build_user_map(advice)
+    top_keys_common = set(baseline.keys()) & set(advice.keys())
+    map_common = set(base_map.keys()) & set(advice_map.keys())
+    st.caption(
+        f"baseline: {len(baseline)} | advice: {len(advice)} | "
+        f"match(top keys): {len(top_keys_common)} | match(mapped): {len(map_common)}"
+    )
+
+    grade_series = (
+        pd.DataFrame(
+            {"grade": [entry.get("grade", "") for entry in base_map.values()]}
+        )
+        .fillna("")
+        .assign(grade=lambda df: df["grade"].astype(str).str.strip())
+    )
+    if not grade_series.empty:
+        grade_counts = grade_series["grade"].value_counts(dropna=False)
+        grade_percent = (grade_counts / len(grade_series) * 100).round(1)
+        grade_table = (
+            pd.DataFrame({"count": grade_counts, "percent": grade_percent})
+            .reset_index()
+            .rename(columns={"index": "grade"})
+        )
+        st.dataframe(grade_table, use_container_width=True)
+
+    rows: List[Dict[str, Any]] = []
+    for uid, entry in baseline.items():
+        text = ""
+        grade = ""
+        if isinstance(entry, dict):
+            grade = entry.get("grade", "")
+            if isinstance(entry.get("response"), str) and entry["response"]:
+                text = entry["response"]
+            elif isinstance(entry.get("text"), str) and entry["text"]:
+                text = entry["text"]
+            elif isinstance(entry.get(uid), str) and entry[uid]:
+                text = entry[uid]
+            else:
+                for key, val in entry.items():
+                    if key in ("grade", "userid", "user_id"):
+                        continue
+                    if isinstance(val, str) and val:
+                        text = val
+                        break
+        else:
+            text = str(entry)
+        rows.append({"userid": uid, "grade": grade, "text": text})
+
+    if "debug_index" not in st.session_state:
+        st.session_state.debug_index = 0
+
+    total = len(rows)
+    if total:
+        nav_cols = st.columns([1, 2, 1])
+        if nav_cols[0].button("◀ Prev", disabled=st.session_state.debug_index <= 0):
+            st.session_state.debug_index = max(0, st.session_state.debug_index - 1)
+        if nav_cols[2].button(
+            "Next ▶", disabled=st.session_state.debug_index >= total - 1
+        ):
+            st.session_state.debug_index = min(total - 1, st.session_state.debug_index + 1)
+
+        current = rows[st.session_state.debug_index]
+        st.caption(
+            f"{st.session_state.debug_index + 1}/{total} | {current['userid']} | grade: {current['grade']}"
+        )
+        st.markdown(clean_baseline_text(current["text"]))
+        st.divider()
+
+    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    with st.expander("baseline plain text (no markdown)"):
+        for row in rows:
+            st.text(f"[{row['userid']}] (grade: {row['grade']})")
+            st.text(row["text"])
+            st.text("----")
+    with st.expander("raw baseline JSON (worse2.json)"):
+        st.json(baseline)
+
+    st.stop()
+    return True
+
 
 # ===== ユーザーデータ管理（進捗読み込み＆プロフィール復元） =====
 def load_user_data(user_id: str) -> Tuple[set[int], Optional[Dict[str, str]]]:
@@ -278,7 +508,7 @@ def load_user_data(user_id: str) -> Tuple[set[int], Optional[Dict[str, str]]]:
         records = worksheet.get_all_records()
         if not records:
             return set(), None
-        
+
         target_uid_str = str(user_id).strip()
         answered_indices = set()
         last_profile = None
@@ -287,10 +517,10 @@ def load_user_data(user_id: str) -> Tuple[set[int], Optional[Dict[str, str]]]:
         for row in records:
             # カラム名の揺らぎ対応
             row_uid = row.get("user_id") or row.get("userid") or ""
-            
+
             # 文字列化して空白除去して比較（これが最も確実）
             if str(row_uid).strip() == target_uid_str:
-                
+
                 # 回答済みインデックスを回収
                 idx_val = row.get("item_index")
                 if idx_val is not None and str(idx_val).strip() != "":
@@ -298,22 +528,21 @@ def load_user_data(user_id: str) -> Tuple[set[int], Optional[Dict[str, str]]]:
                         answered_indices.add(int(idx_val))
                     except ValueError:
                         pass
-                
+
                 # プロフィール情報を保持（上書きしていくので最後に見つかったものが最新になる）
                 # 値が空でない場合のみ取得するようにする
                 if row.get("kyushu_student"):
                     last_profile = {
                         "kyushu_student": row.get("kyushu_student"),
                         "info_course_taken": row.get("info_course_taken"),
-                        "info_course_grade": row.get("info_course_grade")
+                        "info_course_grade": row.get("info_course_grade"),
                     }
 
         return answered_indices, last_profile
-        
+
     except Exception as e:
         print(f"Error loading user data: {e}")
         return set(), None
-
 
 
 # ===== Streamlit アプリ本体 =====
@@ -344,7 +573,7 @@ def main():
 - 評価するフィードバックは {len(df_preview)} 件あります。
 - 所要時間は15~20分程度を想定しています。
 - 回答前に簡単なパーソナリティ設問へ回答してもらいます。
-- 各サンプルについて7項目（正確さ/可読性/説得力/行動可能性/ハルシネーション/有用性/総合評価）で、A・Bいずれが優れているか，5段階で選択いただきます。
+- 各サンプルについて5項目（可読性/説得力/行動可能性/ハルシネーション/有用性）で、A・Bいずれが優れているか，5段階で選択いただきます。
 - {len(df_preview)} 件すべて回答すると終了です。同じ名前でアクセスすれば途中から再開できます。
 回答よろしくお願いいたします！
 
@@ -357,7 +586,9 @@ def main():
 
     st.title("フィードバック比較評価")
     st.markdown("同じ名前でアクセスすると、途中から評価を再開できます。")
-    st.markdown("意図せず途中から始まる場合、同じ名前が使われている可能性があります。\n別の名前をお試しください。")
+    st.markdown(
+        "意図せず途中から始まる場合、同じ名前が使われている可能性があります。\n別の名前をお試しください。"
+    )
 
     user_id = st.text_input(
         "任意の名前を記入してください...",
@@ -367,12 +598,14 @@ def main():
     # もし途中から始まるなら，別の名前で始めるよう促すテキストを表示
     # 赤文字で，名前を忘れると途中から再開できない旨を表示
     st.markdown(
-        "<span style='color:red;'>注意! 名前を忘れると途中から再開できません!</span>", unsafe_allow_html=True
-    ) 
+        "<span style='color:red;'>注意! 名前を忘れると途中から再開できません!</span>",
+        unsafe_allow_html=True,
+    )
     if not user_id:
         st.warning("名前を入力すると評価を開始できます。")
         st.stop()
 
+    debug_admin_view(user_id)
 
     # ユーザーIDが入力されたら、スプレッドシートからデータを取得
     # ここで「回答済みセット」と「過去のプロフィール」を一括取得
@@ -383,32 +616,45 @@ def main():
         st.session_state.current_user_id = user_id
         st.session_state.current_index = None
         st.session_state.survey_answers = None
-        
+
         # ウィジェットのキーを削除してリセットさせる
         for widget_key in ("kyushu_student", "info_course_taken", "info_grade_text"):
             if widget_key in st.session_state:
                 del st.session_state[widget_key]
-        
+
         # ★ここで過去のプロフィールがあればセッションにセット（自動入力）★
         if prev_profile:
             st.toast("過去のプロフィール情報を復元しました", icon="✅")
             st.session_state["kyushu_student"] = prev_profile.get("kyushu_student")
-            st.session_state["info_course_taken"] = prev_profile.get("info_course_taken")
+            st.session_state["info_course_taken"] = prev_profile.get(
+                "info_course_taken"
+            )
             st.session_state["info_grade_text"] = prev_profile.get("info_course_grade")
 
     st.subheader("パーソナリティ質問")
     kyushu_options = ["-- 選択してください --", "はい", "いいえ"]
-    
+
     # keyを指定しているので、session_stateに値が入っていればそれが初期値になる
-    kyushu_student = st.selectbox("九州大学の学生ですか？", kyushu_options, key="kyushu_student")
+    kyushu_student = st.selectbox(
+        "九州大学の学生ですか？", kyushu_options, key="kyushu_student"
+    )
 
     info_course_options = ["-- 選択してください --", "はい", "いいえ"]
-    info_course_taken = st.selectbox("情報科学の講義を受講したことがありますか？", info_course_options, key="info_course_taken")
-    
-    grade_options = ["未回答", "A", "B", "C", "D", "F"]
-    info_course_grade = st.selectbox("受講していたときの成績（任意）", options=grade_options, key="info_grade_text")
+    info_course_taken = st.selectbox(
+        "情報科学の講義を受講したことがありますか？",
+        info_course_options,
+        key="info_course_taken",
+    )
 
-    if kyushu_student == kyushu_options[0] or info_course_taken == info_course_options[0]:
+    grade_options = ["未回答", "A", "B", "C", "D", "F"]
+    info_course_grade = st.selectbox(
+        "受講していたときの成績（任意）", options=grade_options, key="info_grade_text"
+    )
+
+    if (
+        kyushu_student == kyushu_options[0]
+        or info_course_taken == info_course_options[0]
+    ):
         st.warning("必須のアンケート項目に回答してください。")
         st.stop()
 
@@ -430,7 +676,9 @@ def main():
 
     current_index = st.session_state.current_index
     if current_index is None:
-        st.success(f"この参加者IDでは全 {len(df_items)} 件の比較が完了しています。ご協力ありがとうございました。")
+        st.success(
+            f"この参加者IDでは全 {len(df_items)} 件の比較が完了しています。ご協力ありがとうございました。"
+        )
         st.stop()
 
     row = df_items.loc[df_items["item_index"] == current_index].iloc[0]
@@ -479,29 +727,43 @@ def main():
         st.markdown("#### 評価")
 
         questions = [
-            ("accuracy", "ステップ1：正確さ", "学生の成績とフィードバック内の発言傾向は一致していると思いますか？"),
-            ("readability", "ステップ2：可読性", "どちらが読みやすいと感じますか？"),
-            ("persuasiveness", "ステップ3：説得力", "どちらの根拠が明確だと思いますか？"),
-            ("actionability", "ステップ4：行動可能性", "成績向上のための行動が明確に示されていますか？"),
-            ("hallucination", "ステップ5：ハルシネーション評価", "データに基づく回答に見えますか？"),
-            ("usefulness", "ステップ6：有用性", "あなたが学生だった場合、どちらのフィードバックが役に立つと思いますか？"),
-            ("overall", "ステップ7：総合評価", "総合的に見て、どちらが良いと思いますか？"),
+            ("readability", "ステップ1：可読性", "どちらが読みやすいと感じますか？"),
+            (
+                "persuasiveness",
+                "ステップ2：説得力",
+                "どちらの根拠が明確だと思いますか？",
+            ),
+            (
+                "actionability",
+                "ステップ3：行動可能性",
+                "成績向上のためのフィードバックが明確に示されていますか？",
+            ),
+            (
+                "hallucination",
+                "ステップ4：ハルシネーション",
+                "嘘や誇張と思われる表現を使っていますか？",
+            ),
+            (
+                "usefulness",
+                "ステップ5：有用性",
+                "あなたが学生だった場合、どちらのフィードバックが役に立つと思いますか？",
+            ),
         ]
 
         participant_key = str(abs(hash(user_id)))
         responses: Dict[str, str] = {}
-        
+
         # コンテナとフォームの開始
         with st.container(height=800):
             with st.form(key=f"eval_form_{current_index}_{participant_key}"):
-                
+
                 for field, title, description in questions:
                     st.markdown(f"**{title}**")
                     st.caption(description)
 
                     # ユニークキーの生成
                     key = f"{field}_{current_index}_{participant_key}"
-                    
+
                     # session_state の初期化
                     if key not in st.session_state:
                         st.session_state[key] = local_options[2]
@@ -516,7 +778,7 @@ def main():
                         "評価スコア",
                         options=local_options,
                         value=st.session_state.get(key, local_options[2]),
-                        key=f"slider_{key}", 
+                        key=f"slider_{key}",
                         label_visibility="collapsed",
                         format_func=lambda _: "",
                     )
@@ -525,18 +787,20 @@ def main():
                     st.divider()
 
                 # コメント欄
-                st.markdown("**ステップ8：コメント（任意）**")
+                st.markdown("**ステップ6：コメント（任意）**")
                 comment = st.text_area(
                     "各解答について、改善点や感想があればご記入ください。",
                     height=120,
                     key=f"comment_{current_index}_{participant_key}",
                 )
 
-                st.write("") 
+                st.write("")
                 st.write("")
 
                 # 送信ボタン
-                submitted = st.form_submit_button("評価を保存して次へ ▶", use_container_width=True)
+                submitted = st.form_submit_button(
+                    "評価を保存して次へ ▶", use_container_width=True
+                )
 
                 if submitted:
                     # ===== ここで一括して値を回収します =====
@@ -544,7 +808,7 @@ def main():
                         key = f"{field}_{current_index}_{participant_key}"
                         # フォーム送信時の最新の値を取得
                         val = st.session_state.get(f"slider_{key}")
-                        
+
                         if baseline_on_left:
                             responses[field] = val
                         else:
@@ -563,7 +827,7 @@ def main():
                         "comment": comment,
                     }
                     save_response(record)
-                    
+
                     # 次のインデックスへ
                     st.session_state.current_index = get_next_index(
                         all_indices, answered | {current_index}
